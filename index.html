@@ -1,511 +1,192 @@
-"""
-Telegram SoundCloud Clone Bot
-Полный агрегатор музыки из бесплатных источников
-"""
-
 import asyncio
 import sqlite3
 import os
-import yt_dlp
-import requests
 import json
-import aiofiles
-from datetime import datetime
-from io import BytesIO
-from typing import Dict, List, Optional, Tuple
+import time
+import hashlib
+import logging
 from dataclasses import dataclass
+from typing import List, Dict, Optional, Tuple
 
+import aiohttp
+import aiofiles
+import yt_dlp
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputFile
-from aiogram.client.session.aiohttp import AiohttpSession
-import aiohttp
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardMarkup, 
+    InlineKeyboardButton, FSInputFile
+)
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
+
+# ============= ЛОГИРОВАНИЕ =============
+logging.basicConfig(level=logging.INFO)
 
 # ============= КОНФИГУРАЦИЯ =============
 @dataclass
 class Config:
-    BOT_TOKEN: str = "8524841805:AAGnJNG8DDfOxc0Zyubzt1uEXNYe9sHLaCM"  # Замените на реальный токен
-    ADMIN_IDS: List[int] = None
-    
-    def __post_init__(self):
-        if self.ADMIN_IDS is None:
-            self.ADMIN_IDS = [6408686413]
-        
-        self.SOURCES = {
-            "youtube": True,
-            "soundgator": True,
-            "bandcamp": True,
-            "freemusicarchive": True,
-            "jamendo": True,
-            "musopen": True,
-            "internet_archive": True,
-        }
-        
-        self.SEARCH_LIMIT = 15
-        self.MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
-        self.CACHE_DIR = "audio_cache"
-        
-config = Config()
+    # ВАЖНО: На GitHub лучше использовать переменные окружения
+    BOT_TOKEN: str = "8524841805:AAGnJNG8DDfOxc0Zyubzt1uEXNYe9sHLaCM"
+    CACHE_DIR: str = "audio_cache"
+    DB_PATH: str = "music_bot.db"
+    SEARCH_LIMIT: int = 15
 
-# Создаем директорию для кэша
+config = Config()
 os.makedirs(config.CACHE_DIR, exist_ok=True)
 
 # ============= БАЗА ДАННЫХ =============
 class Database:
-    def __init__(self, db_path="music_bot.db"):
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        self.create_tables()
-    
-    def create_tables(self):
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS tracks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                track_id TEXT UNIQUE,
-                title TEXT,
-                artist TEXT,
-                duration INTEGER,
-                source TEXT,
-                source_url TEXT,
-                audio_url TEXT,
-                cover_url TEXT,
-                genre TEXT,
-                play_count INTEGER DEFAULT 0,
-                download_count INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER UNIQUE,
-                username TEXT,
-                search_count INTEGER DEFAULT 0,
-                last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS search_cache (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                query TEXT,
-                results TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
+    def __init__(self):
+        self.conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
+        self.cursor = self.conn.cursor()
+        self._init_db()
+
+    def _init_db(self):
+        self.cursor.execute('''CREATE TABLE IF NOT EXISTS users 
+            (user_id INTEGER PRIMARY KEY, username TEXT, search_count INTEGER DEFAULT 0)''')
+        self.cursor.execute('''CREATE TABLE IF NOT EXISTS search_cache 
+            (query TEXT PRIMARY KEY, results TEXT, timestamp INTEGER)''')
         self.conn.commit()
-    
-    def add_track(self, track_data: dict):
-        cursor = self.conn.cursor()
-        try:
-            cursor.execute('''
-                INSERT OR REPLACE INTO tracks 
-                (track_id, title, artist, duration, source, source_url, audio_url, cover_url, genre)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                track_data['track_id'],
-                track_data['title'],
-                track_data['artist'],
-                track_data['duration'],
-                track_data['source'],
-                track_data['source_url'],
-                track_data['audio_url'],
-                track_data['cover_url'],
-                track_data.get('genre', 'Unknown')
-            ))
-            self.conn.commit()
-            return cursor.lastrowid
-        except Exception as e:
-            print(f"Database error: {e}")
-            return None
-    
-    def get_track(self, track_id: str):
-        cursor = self.conn.cursor()
-        cursor.execute('SELECT * FROM tracks WHERE track_id = ?', (track_id,))
-        return cursor.fetchone()
-    
-    def increment_play_count(self, track_id: str):
-        cursor = self.conn.cursor()
-        cursor.execute('UPDATE tracks SET play_count = play_count + 1 WHERE track_id = ?', (track_id,))
+
+    def add_user(self, user_id: int, username: str):
+        self.cursor.execute('INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)', (user_id, username))
         self.conn.commit()
-    
-    def increment_download_count(self, track_id: str):
-        cursor = self.conn.cursor()
-        cursor.execute('UPDATE tracks SET download_count = download_count + 1 WHERE track_id = ?', (track_id,))
+
+    def cache_search(self, query: str, results: list):
+        self.cursor.execute('INSERT OR REPLACE INTO search_cache VALUES (?, ?, ?)', 
+                           (query, json.dumps(results), int(time.time())))
         self.conn.commit()
-    
-    def add_user(self, user_id: int, username: str = None):
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)
-        ''', (user_id, username))
-        cursor.execute('''
-            UPDATE users SET last_active = CURRENT_TIMESTAMP, username = ?
-            WHERE user_id = ?
-        ''', (username, user_id))
-        self.conn.commit()
-    
-    def add_search_to_cache(self, query: str, results: list):
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            INSERT INTO search_cache (query, results)
-            VALUES (?, ?)
-        ''', (query, json.dumps(results)))
-        self.conn.commit()
-    
-    def get_cached_search(self, query: str):
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            SELECT results FROM search_cache 
-            WHERE query = ? AND datetime(created_at) > datetime('now', '-1 hour')
-            ORDER BY id DESC LIMIT 1
-        ''', (query,))
-        result = cursor.fetchone()
-        return json.loads(result[0]) if result else None
+
+    def get_cached(self, query: str):
+        self.cursor.execute('SELECT results FROM search_cache WHERE query = ? AND timestamp > ?', 
+                           (query, int(time.time()) - 3600))
+        res = self.cursor.fetchone()
+        return json.loads(res[0]) if res else None
 
 db = Database()
 
-# ============= АГРЕГАТОР МУЗЫКИ =============
-class MusicAggregator:
+# ============= ПОИСК И ЗАГРУЗКА =============
+class MusicManager:
     def __init__(self):
-        self.session = aiohttp.ClientSession()
         self.ydl_opts = {
             'format': 'bestaudio/best',
             'quiet': True,
             'no_warnings': True,
             'extract_flat': True,
-            'force_generic_extractor': False,
+            'default_search': 'ytsearch',
         }
-    
-    async def search_youtube(self, query: str, limit: int = 10) -> List[Dict]:
-        """Поиск на YouTube через yt-dlp"""
+
+    async def search(self, query: str) -> List[Dict]:
+        cached = db.get_cached(query)
+        if cached: return cached
+
+        ydl = yt_dlp.YoutubeDL(self.ydl_opts)
+        loop = asyncio.get_event_loop()
         try:
-            ydl = yt_dlp.YoutubeDL(self.ydl_opts)
-            search_query = f"ytsearch{limit}:{query}"
-            result = await asyncio.to_thread(
-                ydl.extract_info, search_query, download=False
-            )
-            
+            # Поиск через YouTube (самый стабильный источник)
+            info = await loop.run_in_executor(None, lambda: ydl.extract_info(f"ytsearch{config.SEARCH_LIMIT}:{query}", download=False))
             tracks = []
-            if 'entries' in result:
-                for entry in result['entries']:
-                    if entry:
-                        track = {
-                            'track_id': f"youtube_{entry['id']}",
-                            'title': entry.get('title', 'Unknown'),
-                            'artist': entry.get('uploader', 'Unknown'),
-                            'duration': entry.get('duration', 0),
-                            'source': 'youtube',
-                            'source_url': entry.get('webpage_url', ''),
-                            'audio_url': None,  # Будет получен при скачивании
-                            'cover_url': entry.get('thumbnail', ''),
-                            'genre': 'YouTube Music'
-                        }
-                        tracks.append(track)
+            for entry in info.get('entries', []):
+                if entry:
+                    tracks.append({
+                        'id': entry['id'],
+                        'title': entry.get('title', 'Unknown'),
+                        'artist': entry.get('uploader', 'Unknown'),
+                        'url': entry.get('webpage_url'),
+                        'duration': entry.get('duration', 0)
+                    })
+            db.cache_search(query, tracks)
             return tracks
         except Exception as e:
-            print(f"YouTube search error: {e}")
+            logging.error(f"Search error: {e}")
             return []
-    
-    async def search_soundgator(self, query: str, limit: int = 10) -> List[Dict]:
-        """Поиск через SoundGator (бесплатные треки)"""
-        try:
-            url = f"https://api.soundgator.com/v1/search"
-            params = {
-                'q': query,
-                'limit': limit,
-                'free': 'true'
-            }
-            
-            async with self.session.get(url, params=params) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    tracks = []
-                    for item in data.get('tracks', []):
-                        track = {
-                            'track_id': f"sg_{item['id']}",
-                            'title': item.get('title', 'Unknown'),
-                            'artist': item.get('artist', {}).get('name', 'Unknown'),
-                            'duration': item.get('duration', 0),
-                            'source': 'soundgator',
-                            'source_url': item.get('permalink_url', ''),
-                            'audio_url': item.get('stream_url', ''),
-                            'cover_url': item.get('artwork_url', ''),
-                            'genre': item.get('genre', 'Unknown')
-                        }
-                        tracks.append(track)
-                    return tracks
-                return []
-        except:
-            return []
-    
-    async def search_freemusicarchive(self, query: str, limit: int = 10) -> List[Dict]:
-        """Поиск в Free Music Archive"""
-        try:
-            url = "https://freemusicarchive.org/api/get/tracks.json"
-            params = {
-                'api_key': 'YOUR_API_KEY',  # Получите на freemusicarchive.org
-                'q': query,
-                'limit': limit
-            }
-            
-            async with self.session.get(url, params=params) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    tracks = []
-                    for item in data.get('dataset', []):
-                        track = {
-                            'track_id': f"fma_{item['track_id']}",
-                            'title': item.get('track_title', 'Unknown'),
-                            'artist': item.get('artist_name', 'Unknown'),
-                            'duration': int(item.get('track_duration', 0)),
-                            'source': 'fma',
-                            'source_url': item.get('track_url', ''),
-                            'audio_url': item.get('track_file', ''),
-                            'cover_url': item.get('track_image_file', ''),
-                            'genre': item.get('genre_title', 'Unknown')
-                        }
-                        tracks.append(track)
-                    return tracks
-                return []
-        except:
-            return []
-    
-    async def search_jamendo(self, query: str, limit: int = 10) -> List[Dict]:
-        """Поиск на Jamendo (бесплатная музыка)"""
-        try:
-            url = "https://api.jamendo.com/v3.0/tracks/"
-            params = {
-                'client_id': 'YOUR_CLIENT_ID',  # Зарегистрируйтесь на jamendo.com
-                'format': 'json',
-                'search': query,
-                'limit': limit,
-                'audioformat': 'mp3'
-            }
-            
-            async with self.session.get(url, params=params) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    tracks = []
-                    for item in data.get('results', []):
-                        track = {
-                            'track_id': f"jam_{item['id']}",
-                            'title': item.get('name', 'Unknown'),
-                            'artist': item.get('artist_name', 'Unknown'),
-                            'duration': item.get('duration', 0),
-                            'source': 'jamendo',
-                            'source_url': item.get('shareurl', ''),
-                            'audio_url': item.get('audio', ''),
-                            'cover_url': item.get('image', ''),
-                            'genre': ' '.join(item.get('tags', {}).get('genres', []))
-                        }
-                        tracks.append(track)
-                    return tracks
-                return []
-        except:
-            return []
-    
-    async def search_internet_archive(self, query: str, limit: int = 10) -> List[Dict]:
-        """Поиск в Internet Archive"""
-        try:
-            url = "https://archive.org/advancedsearch.php"
-            params = {
-                'q': f'({query}) AND mediatype:audio',
-                'fl[]': ['identifier', 'title', 'creator', 'runtime', 'downloads'],
-                'sort[]': ['downloads desc'],
-                'rows': limit,
-                'page': 1,
-                'output': 'json'
-            }
-            
-            async with self.session.get(url, params=params) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    tracks = []
-                    for item in data.get('response', {}).get('docs', []):
-                        track = {
-                            'track_id': f"ia_{item['identifier']}",
-                            'title': item.get('title', 'Unknown'),
-                            'artist': item.get('creator', 'Unknown')[0] if isinstance(item.get('creator'), list) else item.get('creator', 'Unknown'),
-                            'duration': int(item.get('runtime', '0').split(':')[0]) * 60 if ':' in item.get('runtime', '0') else 0,
-                            'source': 'internet_archive',
-                            'source_url': f"https://archive.org/details/{item['identifier']}",
-                            'audio_url': f"https://archive.org/download/{item['identifier']}/{item['identifier']}.mp3",
-                            'cover_url': '',
-                            'genre': 'Archive'
-                        }
-                        tracks.append(track)
-                    return tracks
-                return []
-        except:
-            return []
-    
-    async def aggregate_search(self, query: str, limit: int = 15) -> List[Dict]:
-        """Агрегированный поиск по всем источникам"""
-        # Проверяем кэш
-        cached = db.get_cached_search(query)
-        if cached:
-            return cached[:limit]
-        
-        tasks = []
-        if config.SOURCES.get("youtube"):
-            tasks.append(self.search_youtube(query, limit))
-        if config.SOURCES.get("soundgator"):
-            tasks.append(self.search_soundgator(query, limit))
-        if config.SOURCES.get("freemusicarchive"):
-            tasks.append(self.search_freemusicarchive(query, limit))
-        if config.SOURCES.get("jamendo"):
-            tasks.append(self.search_jamendo(query, limit))
-        if config.SOURCES.get("internet_archive"):
-            tasks.append(self.search_internet_archive(query, limit))
-        
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Объединяем и сортируем результаты
-        all_tracks = []
-        for result in results:
-            if isinstance(result, list):
-                all_tracks.extend(result)
-        
-        # Убираем дубликаты
-        unique_tracks = []
-        seen_ids = set()
-        for track in all_tracks:
-            if track['track_id'] not in seen_ids:
-                seen_ids.add(track['track_id'])
-                unique_tracks.append(track)
-        
-        # Сохраняем в кэш
-        db.add_search_to_cache(query, unique_tracks[:limit])
-        
-        return unique_tracks[:limit]
-    
-    async def download_audio(self, track_data: Dict) -> Tuple[Optional[str], Optional[str]]:
-        """Скачивание аудиофайла"""
-        try:
-            if track_data['source'] == 'youtube':
-                # Для YouTube используем yt-dlp для скачивания
-                ydl_opts = {
-                    'format': 'bestaudio/best',
-                    'outtmpl': f"{config.CACHE_DIR}/%(id)s.%(ext)s",
-                    'quiet': True,
-                    'no_warnings': True,
-                }
-                
-                ydl = yt_dlp.YoutubeDL(ydl_opts)
-                info = await asyncio.to_thread(
-                    ydl.extract_info, track_data['source_url'], download=True
-                )
-                
-                # Находим скачанный файл
-                downloaded_files = [f for f in os.listdir(config.CACHE_DIR) 
-                                  if f.startswith(info['id'])]
-                if downloaded_files:
-                    file_path = os.path.join(config.CACHE_DIR, downloaded_files[0])
-                    return file_path, info.get('title', 'Unknown')
-            
-            elif track_data['audio_url']:
-                # Для других источников скачиваем напрямую
-                async with self.session.get(track_data['audio_url']) as response:
-                    if response.status == 200:
-                        file_ext = 'mp3'  # или определить из Content-Type
-                        filename = f"{track_data['track_id']}.{file_ext}"
-                        file_path = os.path.join(config.CACHE_DIR, filename)
-                        
-                        async with aiofiles.open(file_path, 'wb') as f:
-                            await f.write(await response.read())
-                        
-                        return file_path, track_data['title']
-            
-            return None, None
-        except Exception as e:
-            print(f"Download error: {e}")
-            return None, None
 
-aggregator = MusicAggregator()
+    async def download(self, track_id: str, url: str) -> Optional[str]:
+        file_path = os.path.join(config.CACHE_DIR, f"{track_id}.mp3")
+        if os.path.exists(file_path): return file_path
+
+        opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': os.path.join(config.CACHE_DIR, f"{track_id}.%(ext)s"),
+            'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}],
+            'quiet': True
+        }
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                await asyncio.get_event_loop().run_in_executor(None, lambda: ydl.download([url]))
+            return file_path
+        except Exception as e:
+            logging.error(f"Download error: {e}")
+            return None
+
+manager = MusicManager()
 
 # ============= ТЕЛЕГРАМ БОТ =============
-bot = Bot(token=config.BOT_TOKEN)
+bot = Bot(token=config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
+user_sessions = {} # Временное хранение результатов поиска
 
-# ============= КЛАВИАТУРЫ =============
-def get_search_keyboard(tracks: List[Dict], current_page: int = 0, per_page: int = 5) -> InlineKeyboardMarkup:
-    """Клавиатура для результатов поиска"""
-    start_idx = current_page * per_page
-    end_idx = start_idx + per_page
-    page_tracks = tracks[start_idx:end_idx]
+def get_tracks_kb(user_id: int, page: int = 0) -> InlineKeyboardMarkup:
+    data = user_sessions.get(user_id, [])
+    per_page = 5
+    start = page * per_page
+    end = start + per_page
     
-    keyboard = []
-    for i, track in enumerate(page_tracks, start=1):
-        btn_text = f"{i}. {track['title'][:30]} - {track['artist'][:20]}"
-        callback_data = f"track_{track['track_id']}"
-        keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=callback_data)])
+    buttons = []
+    for i, track in enumerate(data[start:end]):
+        buttons.append([InlineKeyboardButton(text=f"🎵 {track['title'][:35]}", callback_data=f"dl_{start+i}")])
     
-    # Кнопки навигации
-    nav_buttons = []
-    if current_page > 0:
-        nav_buttons.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"page_{current_page-1}"))
+    nav = []
+    if page > 0: nav.append(InlineKeyboardButton(text="◀️", callback_data=f"pg_{page-1}"))
+    nav.append(InlineKeyboardButton(text=f"{page+1}", callback_data="ignore"))
+    if end < len(data): nav.append(InlineKeyboardButton(text="▶️", callback_data=f"pg_{page+1}"))
     
-    if end_idx < len(tracks):
-        nav_buttons.append(InlineKeyboardButton(text="Вперед ▶️", callback_data=f"page_{current_page+1}"))
-    
-    if nav_buttons:
-        keyboard.append(nav_buttons)
-    
-    keyboard.append([InlineKeyboardButton(text="🔍 Новый поиск", callback_data="new_search")])
-    
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+    if nav: buttons.append(nav)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def get_track_keyboard(track_id: str) -> InlineKeyboardMarkup:
-    """Клавиатура для управления треком"""
-    keyboard = [
-        [
-            InlineKeyboardButton(text="▶️ Слушать", callback_data=f"play_{track_id}"),
-            InlineKeyboardButton(text="⬇️ Скачать", callback_data=f"download_{track_id}")
-        ],
-        [
-            InlineKeyboardButton(text="🎵 Похожие", callback_data=f"similar_{track_id}"),
-            InlineKeyboardButton(text="🔙 Назад к поиску", callback_data="back_to_search")
-        ]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-# ============= ОБРАБОТЧИКИ =============
+# ============= ХЕНДЛЕРЫ =============
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    """Обработчик команды /start"""
-    db.add_user(message.from_user.id, message.from_user.username)
-    
-    welcome_text = """
-🎵 *Добро пожаловать в SoundCloud Clone Bot!*
+async def start(m: Message):
+    db.add_user(m.from_user.id, m.from_user.username)
+    await m.answer("👋 Привет! Введи название песни, и я ее найду.")
 
-Я могу найти для вас любую музыку из бесплатных источников со всего мира.
-
-*Доступные команды:*
-/search - Поиск музыки
-/trending - Популярные треки
-/help - Помощь
-
-Просто отправьте название трека или исполнителя для поиска!
-    """
-    
-    await message.answer(welcome_text, parse_mode="Markdown")
-
-@dp.message(Command("search"))
-async def cmd_search(message: types.Message):
-    """Обработчик команды поиска"""
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await message.answer("Введите запрос для поиска: /search <название трека или исполнителя>")
-        return
-    
-    query = args[1]
-    await message.answer(f"🔍 Ищу: *{query}*...", parse_mode="Markdown")
-    
-    # Ищем треки
-    tracks = await aggregator.aggregate_search(query, config.SEARCH_LIMIT)
+@dp.message(F.text)
+async def handle_search(m: Message):
+    msg = await m.answer("🔍 Ищу треки...")
+    tracks = await manager.search(m.text)
     
     if not tracks:
-        await message.answer("❌ Ничего не найдено. П    
+        return await msg.edit_text("❌ Ничего не найдено.")
+    
+    user_sessions[m.from_user.id] = tracks
+    await msg.edit_text(f"🎶 Результаты для: <b>{m.text}</b>", reply_markup=get_tracks_kb(m.from_user.id))
+
+@dp.callback_query(F.data.startswith("pg_"))
+async def paginate(clb: CallbackQuery):
+    page = int(clb.data.split("_")[1])
+    await clb.message.edit_reply_markup(reply_markup=get_tracks_kb(clb.from_user.id, page))
+    await clb.answer()
+
+@dp.callback_query(F.data.startswith("dl_"))
+async def download(clb: CallbackQuery):
+    idx = int(clb.data.split("_")[1])
+    tracks = user_sessions.get(clb.from_user.id)
+    if not tracks: return await clb.answer("Ошибка сессии")
+    
+    track = tracks[idx]
+    await clb.answer(f"Загружаю: {track['title'][:20]}...")
+    
+    path = await manager.download(track['id'], track['url'])
+    if path:
+        audio = FSInputFile(path)
+        await clb.message.answer_audio(audio, caption=f"✅ {track['title']}\nИсполнитель: {track['artist']}")
+    else:
+        await clb.message.answer("❌ Ошибка при скачивании файла.")
+
+async def main():
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+        
