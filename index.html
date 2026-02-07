@@ -3,140 +3,52 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Neon Music Hub</title>
+    <title>Neon Music Full</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;900&family=Montserrat:wght@300;700&display=swap');
-
-        :root {
-            --bg: #050505;
-            --card: #111111;
-            --cyan: #00f2ff;
-            --pink: #ff007f;
-            --glass: rgba(255, 255, 255, 0.05);
-        }
-
-        body {
-            margin: 0; background: var(--bg); color: white;
-            font-family: 'Montserrat', sans-serif; height: 100vh;
-            display: flex; flex-direction: column; overflow: hidden;
-        }
-
-        /* Неоновая шапка */
-        .neon-header {
-            padding: 25px 20px; text-align: center;
-            border-bottom: 1px solid var(--glass);
-            background: linear-gradient(180deg, rgba(0,242,255,0.1) 0%, transparent 100%);
-        }
-        .neon-header h1 {
-            font-family: 'Orbitron', sans-serif; font-size: 18px;
-            margin: 0; letter-spacing: 5px; color: 
-        }
-
-        /* Навигация (Категории) */
-        .nav-bar {
-            display: flex; overflow-x: auto; padding: 15px; gap: 10px;
-            background: var(--bg); sticky: top 0;
-        }
-        .nav-item {
-            padding: 8px 15px; background: var(--card); border-radius: 20px;
-            font-size: 12px; font-weight: 700; white-space: nowrap;
-            border: 1px solid var(--glass); transition: 0.3s;
-        }
-        .nav-item.active {
-            background: var(--cyan); color: black; box-shadow: 0 0 15px var(--cyan);
-        }
-
-        /* Секции (Топ Жанров и Артистов) */
-        .section-title { padding: 10px 20px; font-size: 14px; font-weight: 900; color: var(--pink); text-transform: uppercase; }
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@700&family=Montserrat:wght@400;700&display=swap');
+        :root { --bg: #050505; --cyan: #00f2ff; --card: #111; }
+        body { margin: 0; background: var(--bg); color: white; font-family: 'Montserrat', sans-serif; overflow-x: hidden; }
         
-        .horizontal-scroll {
-            display: flex; overflow-x: auto; padding: 0 15px 20px; gap: 15px;
-        }
-        .genre-card {
-            min-width: 100px; height: 100px; background: var(--card);
-            border-radius: 15px; display: flex; align-items: center; justify-content: center;
-            border: 1px solid var(--glass); font-weight: 900; font-size: 12px;
-            background: linear-gradient(45deg, #111, #222);
-            text-shadow: 0 0 5px white;
-        }
+        .header { padding: 20px; text-align: center; border-bottom: 1px solid rgba(0,242,255,0.3); }
+        .header h1 { font-family: 'Orbitron', sans-serif; font-size: 18px; color: var(--cyan); margin: 0; text-shadow: 0 0 10px var(--cyan); }
 
-        /* Поиск */
-        .search-container { padding: 0 15px 15px; position: relative; }
-        .search-bar {
-            width: 100%; padding: 15px; border-radius: 12px; border: 1px solid #333;
-            background: var(--card); color: white; outline: none; box-sizing: border-box;
-        }
-        .search-bar:focus { border-color: var(--pink); box-shadow: 0 0 10px rgba(255,0,127,0.3); }
+        /* Контейнер для плеера YouTube */
+        #video-container { width: 100%; height: 200px; background: #000; display: none; margin-bottom: 10px; border-bottom: 2px solid var(--cyan); }
 
-        .search-results {
-            position: absolute; top: 60px; left: 15px; right: 15px;
-            background: #111; border-radius: 12px; z-index: 100;
-            max-height: 200px; overflow-y: auto; border: 1px solid #444; display: none;
-        }
-        .res-item { padding: 12px; border-bottom: 1px solid #222; display: flex; justify-content: space-between; align-items: center; }
+        .search-section { padding: 15px; }
+        .search-bar { width: 100%; padding: 15px; border-radius: 12px; border: 1px solid #333; background: #111; color: white; outline: none; box-sizing: border-box; }
 
-        /* Список треков */
-        .playlist { flex-grow: 1; overflow-y: auto; padding: 0 15px 100px; }
-        .track-card {
-            background: var(--card); border-radius: 15px; padding: 15px;
-            display: flex; align-items: center; margin-bottom: 10px;
-            border: 1px solid var(--glass);
-        }
-        .track-card.liked { border-color: var(--cyan); }
-        .track-card.disliked { opacity: 0.5; border-color: var(--pink); }
-
+        .playlist { padding: 0 15px 100px; }
+        .track-card { background: var(--card); border-radius: 15px; padding: 15px; display: flex; align-items: center; margin-bottom: 10px; border: 1px solid rgba(255,255,255,0.05); }
         .track-info { flex-grow: 1; }
-        .t-title { font-weight: 700; font-size: 15px; display: block; }
-        .t-artist { font-size: 11px; color: #888; }
+        .t-title { font-weight: 700; font-size: 15px; display: block; color: var(--cyan); }
+        .t-artist { font-size: 12px; color: #888; }
+        
+        .play-btn { background: var(--cyan); color: black; border: none; padding: 8px 15px; border-radius: 8px; font-weight: bold; cursor: pointer; }
 
-        .actions { display: flex; gap: 10px; }
-        .v-btn { background: none; border: 1px solid #444; color: white; border-radius: 8px; width: 35px; height: 35px; }
-        .v-btn.up.active { background: var(--cyan); color: black; }
-        .v-btn.down.active { background: var(--pink); color: black; }
-
-        /* Скроллбары */
-        ::-webkit-scrollbar { display: none; }
+        .results { position: absolute; top: 130px; left: 15px; right: 15px; background: #1a1a1a; border-radius: 10px; z-index: 100; display: none; border: 1px solid #444; max-height: 250px; overflow-y: auto; }
+        .res-item { padding: 12px; border-bottom: 1px solid #222; display: flex; justify-content: space-between; align-items: center; }
     </style>
 </head>
 <body>
 
-    <div class="neon-header">
-        <h1>NEON MUSIC HUB</h1>
+    <div class="header"><h1>NEON PLAYER FULL</h1></div>
+
+    <div id="video-container"></div>
+
+    <div class="search-section">
+        <input type="text" class="search-bar" id="search-input" placeholder="🔍 Введи название песни..." oninput="searchMusic()">
     </div>
 
-    <div class="nav-bar">
-        <div class="nav-item active" onclick="switchTab('main')">ГЛАВНАЯ</div>
-        <div class="nav-item" onclick="switchTab('liked')">ПОНРАВИЛОСЬ</div>
-        <div class="nav-item" onclick="switchTab('disliked')">ДИЗЛАЙКИ</div>
-        <div class="nav-item" onclick="switchTab('top')">ТОП-ЧАРТЫ</div>
-    </div>
-
-    <div id="main-content">
-        <div class="search-container">
-            <input type="text" class="search-bar" id="search-input" placeholder="Поиск по всему миру..." oninput="searchMusic()">
-            <div class="search-results" id="results"></div>
-        </div>
-
-        <div class="section-title">Топ Жанров</div>
-        <div class="horizontal-scroll">
-            <div class="genre-card" style="border-bottom: 3px solid #00f2ff">ROCK</div>
-            <div class="genre-card" style="border-bottom: 3px solid #ff007f">PHONK</div>
-            <div class="genre-card" style="border-bottom: 3px solid #7f00ff">TECHNO</div>
-            <div class="genre-card" style="border-bottom: 3px solid #00ff40">HIP-HOP</div>
-        </div>
-
-        <div class="section-title" id="list-title">Общая очередь</div>
-        <div class="playlist" id="playlist"></div>
-    </div>
+    <div class="results" id="results"></div>
+    <div class="playlist" id="playlist"></div>
 
     <script>
         const tg = window.Telegram.WebApp;
         tg.expand();
-        tg.headerColor = "#050505";
 
-        let tracks = []; 
-        let currentTab = 'main';
+        let tracks = [];
 
         async function searchMusic() {
             const query = document.getElementById('search-input').value;
@@ -151,9 +63,8 @@
                 const item = document.createElement('div');
                 item.className = 'res-item';
                 item.innerHTML = `
-                    <div><div style="font-weight:bold">${song.trackName}</div><div style="font-size:10px">${song.artistName}</div></div>
-                    <button style="background:var(--cyan);border:none;border-radius:5px;padding:5px 10px;font-weight:900" 
-                        onclick="addTrack('${song.trackName.replace(/'/g,"")}', '${song.artistName.replace(/'/g,"")}')">ADD</button>
+                    <div><b>${song.trackName}</b><br><small>${song.artistName}</small></div>
+                    <button class="play-btn" onclick="addTrack('${song.trackName.replace(/'/g,"")}', '${song.artistName.replace(/'/g,"")}')">+</button>
                 `;
                 resDiv.appendChild(item);
             });
@@ -162,50 +73,37 @@
 
         function addTrack(title, artist) {
             const id = Date.now();
-            tracks.push({ id, title, artist, status: 'none', score: 0 });
-            document.getElementById('search-input').value = '';
+            tracks.push({ id, title, artist });
             document.getElementById('results').style.display = 'none';
+            document.getElementById('search-input').value = '';
+            render();
             tg.HapticFeedback.notificationOccurred('success');
-            tg.sendData(JSON.stringify({action: 'add', title, artist}));
-            render();
         }
 
-        function setStatus(id, status) {
-            const track = tracks.find(t => t.id === id);
-            if (track) {
-                track.status = (track.status === status) ? 'none' : status;
-                tg.HapticFeedback.impactOccurred('medium');
-                render();
-            }
-        }
-
-        function switchTab(tab) {
-            currentTab = tab;
-            document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
-            event.target.classList.add('active');
-            render();
+        function playFull(title, artist) {
+            const container = document.getElementById('video-container');
+            const query = encodeURIComponent(`${artist} ${title} official audio`);
+            
+            // Вставляем YouTube плеер через DuckDuckGo прокси (самый стабильный метод)
+            container.innerHTML = `<iframe width="100%" height="100%" src="https://www.youtube.com/embed?listType=search&list=${query}" frameborder="0" allow="autoplay; encrypted-media" allowfullscreen></iframe>`;
+            container.style.display = 'block';
+            
+            tg.HapticFeedback.impactOccurred('medium');
+            window.scrollTo(0, 0); // Прокрутка вверх к плееру
         }
 
         function render() {
             const container = document.getElementById('playlist');
             container.innerHTML = '';
-            
-            let filtered = tracks;
-            if (currentTab === 'liked') filtered = tracks.filter(t => t.status === 'up');
-            if (currentTab === 'disliked') filtered = tracks.filter(t => t.status === 'down');
-            
-            filtered.forEach(t => {
+            tracks.reverse().forEach(t => {
                 const card = document.createElement('div');
-                card.className = `track-card ${t.status === 'up' ? 'liked' : ''} ${t.status === 'down' ? 'disliked' : ''}`;
+                card.className = 'track-card';
                 card.innerHTML = `
                     <div class="track-info">
                         <span class="t-title">${t.title}</span>
                         <span class="t-artist">${t.artist}</span>
                     </div>
-                    <div class="actions">
-                        <button class="v-btn down ${t.status === 'down' ? 'active' : ''}" onclick="setStatus(${t.id}, 'down')">✕</button>
-                        <button class="v-btn up ${t.status === 'up' ? 'active' : ''}" onclick="setStatus(${t.id}, 'up')">❤</button>
-                    </div>
+                    <button class="play-btn" onclick="playFull('${t.title}', '${t.artist}')">PLAY</button>
                 `;
                 container.appendChild(card);
             });
