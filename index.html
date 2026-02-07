@@ -1,114 +1,511 @@
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Neon Music Legacy</title>
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Montserrat:wght@400;600;800&display=swap');
-        :root { --bg: #050505; --card: #121212; --cyan: #00f2ff; --pink: #ff007f; --violet: #bc13fe; }
-        body { margin: 0; background: var(--bg); color: white; font-family: 'Montserrat', sans-serif; overflow-x: hidden; }
+"""
+Telegram SoundCloud Clone Bot
+Полный агрегатор музыки из бесплатных источников
+"""
+
+import asyncio
+import sqlite3
+import os
+import yt_dlp
+import requests
+import json
+import aiofiles
+from datetime import datetime
+from io import BytesIO
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputFile
+from aiogram.client.session.aiohttp import AiohttpSession
+import aiohttp
+
+# ============= КОНФИГУРАЦИЯ =============
+@dataclass
+class Config:
+    BOT_TOKEN: str = "8524841805:AAGnJNG8DDfOxc0Zyubzt1uEXNYe9sHLaCM"  # Замените на реальный токен
+    ADMIN_IDS: List[int] = None
+    
+    def __post_init__(self):
+        if self.ADMIN_IDS is None:
+            self.ADMIN_IDS = [6408686413]
         
-        .header { padding: 20px; text-align: center; border-bottom: 1px solid var(--cyan); background: rgba(0,242,255,0.05); }
-        .header h1 { font-family: 'Orbitron', sans-serif; font-size: 18px; color: var(--cyan); letter-spacing: 3px; margin: 0; }
-
-        .search-container { padding: 15px; background: var(--bg); position: sticky; top: 0; z-index: 100; }
-        .search-input { width: 100%; padding: 15px; border-radius: 12px; border: 1px solid #333; background: #1a1a1a; color: white; outline: none; box-sizing: border-box; }
-
-        .section-header { padding: 15px 15px 5px; font-size: 12px; font-weight: 800; color: var(--pink); text-transform: uppercase; }
-        .scroll-row { display: flex; overflow-x: auto; padding: 10px 15px; gap: 12px; }
-        .genre-card { min-width: 90px; height: 50px; background: var(--card); border-radius: 10px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--violet); font-size: 10px; font-weight: bold; }
-
-        .track-list { padding: 10px 15px 120px; }
-        .track-card { background: var(--card); border-radius: 12px; padding: 12px; display: flex; align-items: center; margin-bottom: 10px; border: 1px solid rgba(255,255,255,0.05); }
-        .track-info { flex-grow: 1; }
-        .t-title { font-weight: 700; font-size: 14px; color: var(--cyan); display: block; }
-        .t-artist { font-size: 11px; color: #888; }
-        .play-btn { width: 35px; height: 35px; background: var(--cyan); border-radius: 50%; display: flex; align-items: center; justify-content: center; color: black; font-weight: bold; }
-
-        /* Фиксированный плеер */
-        .bottom-player { position: fixed; bottom: 0; width: 100%; background: #111; border-top: 2px solid var(--cyan); padding: 15px; display: none; box-sizing: border-box; z-index: 1000; }
-        audio { width: 100%; height: 35px; filter: invert(1); margin-top: 10px; }
-
-        .loader { display: none; text-align: center; color: var(--cyan); font-size: 12px; padding: 10px; }
-    </style>
-</head>
-<body>
-
-<div class="header"><h1>NEON MUSIC RU</h1></div>
-
-<div class="search-container">
-    <input type="text" class="search-input" id="search" placeholder="🔍 Поиск (Полные треки без VPN)..." onchange="searchTracks()">
-    <div id="loader" class="loader">Ищу файлы...</div>
-</div>
-
-<div class="section-header">Топ Жанров</div>
-<div class="scroll-row">
-    <div class="genre-card">PHONK</div>
-    <div class="genre-card">RUSSIAN</div>
-    <div class="genre-card">HIP-HOP</div>
-    <div class="genre-card">POP</div>
-</div>
-
-<div class="section-header">Плейлист</div>
-<div class="track-list" id="list">
-    <div style="text-align: center; color: #444; margin-top: 20px;">Введите название песни в поиске выше</div>
-</div>
-
-<div class="bottom-player" id="player-ui">
-    <div id="p-title" style="font-size: 11px; font-weight: bold; color: var(--cyan);"></div>
-    <audio id="main-audio" controls autoplay></audio>
-</div>
-
-<script>
-    const tg = window.Telegram.WebApp;
-    tg.expand();
-
-    async function searchTracks() {
-        const q = document.getElementById('search').value;
-        const list = document.getElementById('list');
-        const loader = document.getElementById('loader');
-        if (q.length < 2) return;
-
-        loader.style.display = 'block';
-        
-        try {
-            // Используем публичный API музыкального поисковика (прямые MP3)
-            const r = await fetch(`https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=10`);
-            const d = await r.json();
-            
-            list.innerHTML = '';
-            d.data.forEach(s => {
-                const card = document.createElement('div');
-                card.className = 'track-card';
-                // Deezer отдает preview, но мы будем использовать их как основной поток, 
-                // так как они стабильны в РФ. Для ПОЛНЫХ треков мы используем прокси-поиск.
-                card.innerHTML = `
-                    <div class="track-info">
-                        <span class="t-title">${s.title}</span>
-                        <span class="t-artist">${s.artist.name}</span>
-                    </div>
-                    <div class="play-btn" onclick="play('${s.preview}', '${s.title.replace(/'/g,"")}')">▶</div>
-                `;
-                list.appendChild(card);
-            });
-        } catch(e) {
-            alert("Ошибка поиска. Попробуй другое название.");
-        } finally {
-            loader.style.display = 'none';
+        self.SOURCES = {
+            "youtube": True,
+            "soundgator": True,
+            "bandcamp": True,
+            "freemusicarchive": True,
+            "jamendo": True,
+            "musopen": True,
+            "internet_archive": True,
         }
-    }
+        
+        self.SEARCH_LIMIT = 15
+        self.MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+        self.CACHE_DIR = "audio_cache"
+        
+config = Config()
 
-    function play(url, title) {
-        const ui = document.getElementById('player-ui');
-        const audio = document.getElementById('main-audio');
-        document.getElementById('p-title').innerText = "ИГРАЕТ: " + title;
-        ui.style.display = 'block';
-        audio.src = url;
-        audio.play();
-        tg.HapticFeedback.impactOccurred('medium');
-    }
-</script>
-</body>
-</html>
+# Создаем директорию для кэша
+os.makedirs(config.CACHE_DIR, exist_ok=True)
+
+# ============= БАЗА ДАННЫХ =============
+class Database:
+    def __init__(self, db_path="music_bot.db"):
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.create_tables()
+    
+    def create_tables(self):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS tracks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                track_id TEXT UNIQUE,
+                title TEXT,
+                artist TEXT,
+                duration INTEGER,
+                source TEXT,
+                source_url TEXT,
+                audio_url TEXT,
+                cover_url TEXT,
+                genre TEXT,
+                play_count INTEGER DEFAULT 0,
+                download_count INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER UNIQUE,
+                username TEXT,
+                search_count INTEGER DEFAULT 0,
+                last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS search_cache (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query TEXT,
+                results TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        self.conn.commit()
+    
+    def add_track(self, track_data: dict):
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute('''
+                INSERT OR REPLACE INTO tracks 
+                (track_id, title, artist, duration, source, source_url, audio_url, cover_url, genre)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                track_data['track_id'],
+                track_data['title'],
+                track_data['artist'],
+                track_data['duration'],
+                track_data['source'],
+                track_data['source_url'],
+                track_data['audio_url'],
+                track_data['cover_url'],
+                track_data.get('genre', 'Unknown')
+            ))
+            self.conn.commit()
+            return cursor.lastrowid
+        except Exception as e:
+            print(f"Database error: {e}")
+            return None
+    
+    def get_track(self, track_id: str):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM tracks WHERE track_id = ?', (track_id,))
+        return cursor.fetchone()
+    
+    def increment_play_count(self, track_id: str):
+        cursor = self.conn.cursor()
+        cursor.execute('UPDATE tracks SET play_count = play_count + 1 WHERE track_id = ?', (track_id,))
+        self.conn.commit()
+    
+    def increment_download_count(self, track_id: str):
+        cursor = self.conn.cursor()
+        cursor.execute('UPDATE tracks SET download_count = download_count + 1 WHERE track_id = ?', (track_id,))
+        self.conn.commit()
+    
+    def add_user(self, user_id: int, username: str = None):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)
+        ''', (user_id, username))
+        cursor.execute('''
+            UPDATE users SET last_active = CURRENT_TIMESTAMP, username = ?
+            WHERE user_id = ?
+        ''', (username, user_id))
+        self.conn.commit()
+    
+    def add_search_to_cache(self, query: str, results: list):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT INTO search_cache (query, results)
+            VALUES (?, ?)
+        ''', (query, json.dumps(results)))
+        self.conn.commit()
+    
+    def get_cached_search(self, query: str):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT results FROM search_cache 
+            WHERE query = ? AND datetime(created_at) > datetime('now', '-1 hour')
+            ORDER BY id DESC LIMIT 1
+        ''', (query,))
+        result = cursor.fetchone()
+        return json.loads(result[0]) if result else None
+
+db = Database()
+
+# ============= АГРЕГАТОР МУЗЫКИ =============
+class MusicAggregator:
+    def __init__(self):
+        self.session = aiohttp.ClientSession()
+        self.ydl_opts = {
+            'format': 'bestaudio/best',
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,
+            'force_generic_extractor': False,
+        }
+    
+    async def search_youtube(self, query: str, limit: int = 10) -> List[Dict]:
+        """Поиск на YouTube через yt-dlp"""
+        try:
+            ydl = yt_dlp.YoutubeDL(self.ydl_opts)
+            search_query = f"ytsearch{limit}:{query}"
+            result = await asyncio.to_thread(
+                ydl.extract_info, search_query, download=False
+            )
+            
+            tracks = []
+            if 'entries' in result:
+                for entry in result['entries']:
+                    if entry:
+                        track = {
+                            'track_id': f"youtube_{entry['id']}",
+                            'title': entry.get('title', 'Unknown'),
+                            'artist': entry.get('uploader', 'Unknown'),
+                            'duration': entry.get('duration', 0),
+                            'source': 'youtube',
+                            'source_url': entry.get('webpage_url', ''),
+                            'audio_url': None,  # Будет получен при скачивании
+                            'cover_url': entry.get('thumbnail', ''),
+                            'genre': 'YouTube Music'
+                        }
+                        tracks.append(track)
+            return tracks
+        except Exception as e:
+            print(f"YouTube search error: {e}")
+            return []
+    
+    async def search_soundgator(self, query: str, limit: int = 10) -> List[Dict]:
+        """Поиск через SoundGator (бесплатные треки)"""
+        try:
+            url = f"https://api.soundgator.com/v1/search"
+            params = {
+                'q': query,
+                'limit': limit,
+                'free': 'true'
+            }
+            
+            async with self.session.get(url, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    tracks = []
+                    for item in data.get('tracks', []):
+                        track = {
+                            'track_id': f"sg_{item['id']}",
+                            'title': item.get('title', 'Unknown'),
+                            'artist': item.get('artist', {}).get('name', 'Unknown'),
+                            'duration': item.get('duration', 0),
+                            'source': 'soundgator',
+                            'source_url': item.get('permalink_url', ''),
+                            'audio_url': item.get('stream_url', ''),
+                            'cover_url': item.get('artwork_url', ''),
+                            'genre': item.get('genre', 'Unknown')
+                        }
+                        tracks.append(track)
+                    return tracks
+                return []
+        except:
+            return []
+    
+    async def search_freemusicarchive(self, query: str, limit: int = 10) -> List[Dict]:
+        """Поиск в Free Music Archive"""
+        try:
+            url = "https://freemusicarchive.org/api/get/tracks.json"
+            params = {
+                'api_key': 'YOUR_API_KEY',  # Получите на freemusicarchive.org
+                'q': query,
+                'limit': limit
+            }
+            
+            async with self.session.get(url, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    tracks = []
+                    for item in data.get('dataset', []):
+                        track = {
+                            'track_id': f"fma_{item['track_id']}",
+                            'title': item.get('track_title', 'Unknown'),
+                            'artist': item.get('artist_name', 'Unknown'),
+                            'duration': int(item.get('track_duration', 0)),
+                            'source': 'fma',
+                            'source_url': item.get('track_url', ''),
+                            'audio_url': item.get('track_file', ''),
+                            'cover_url': item.get('track_image_file', ''),
+                            'genre': item.get('genre_title', 'Unknown')
+                        }
+                        tracks.append(track)
+                    return tracks
+                return []
+        except:
+            return []
+    
+    async def search_jamendo(self, query: str, limit: int = 10) -> List[Dict]:
+        """Поиск на Jamendo (бесплатная музыка)"""
+        try:
+            url = "https://api.jamendo.com/v3.0/tracks/"
+            params = {
+                'client_id': 'YOUR_CLIENT_ID',  # Зарегистрируйтесь на jamendo.com
+                'format': 'json',
+                'search': query,
+                'limit': limit,
+                'audioformat': 'mp3'
+            }
+            
+            async with self.session.get(url, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    tracks = []
+                    for item in data.get('results', []):
+                        track = {
+                            'track_id': f"jam_{item['id']}",
+                            'title': item.get('name', 'Unknown'),
+                            'artist': item.get('artist_name', 'Unknown'),
+                            'duration': item.get('duration', 0),
+                            'source': 'jamendo',
+                            'source_url': item.get('shareurl', ''),
+                            'audio_url': item.get('audio', ''),
+                            'cover_url': item.get('image', ''),
+                            'genre': ' '.join(item.get('tags', {}).get('genres', []))
+                        }
+                        tracks.append(track)
+                    return tracks
+                return []
+        except:
+            return []
+    
+    async def search_internet_archive(self, query: str, limit: int = 10) -> List[Dict]:
+        """Поиск в Internet Archive"""
+        try:
+            url = "https://archive.org/advancedsearch.php"
+            params = {
+                'q': f'({query}) AND mediatype:audio',
+                'fl[]': ['identifier', 'title', 'creator', 'runtime', 'downloads'],
+                'sort[]': ['downloads desc'],
+                'rows': limit,
+                'page': 1,
+                'output': 'json'
+            }
+            
+            async with self.session.get(url, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    tracks = []
+                    for item in data.get('response', {}).get('docs', []):
+                        track = {
+                            'track_id': f"ia_{item['identifier']}",
+                            'title': item.get('title', 'Unknown'),
+                            'artist': item.get('creator', 'Unknown')[0] if isinstance(item.get('creator'), list) else item.get('creator', 'Unknown'),
+                            'duration': int(item.get('runtime', '0').split(':')[0]) * 60 if ':' in item.get('runtime', '0') else 0,
+                            'source': 'internet_archive',
+                            'source_url': f"https://archive.org/details/{item['identifier']}",
+                            'audio_url': f"https://archive.org/download/{item['identifier']}/{item['identifier']}.mp3",
+                            'cover_url': '',
+                            'genre': 'Archive'
+                        }
+                        tracks.append(track)
+                    return tracks
+                return []
+        except:
+            return []
+    
+    async def aggregate_search(self, query: str, limit: int = 15) -> List[Dict]:
+        """Агрегированный поиск по всем источникам"""
+        # Проверяем кэш
+        cached = db.get_cached_search(query)
+        if cached:
+            return cached[:limit]
+        
+        tasks = []
+        if config.SOURCES.get("youtube"):
+            tasks.append(self.search_youtube(query, limit))
+        if config.SOURCES.get("soundgator"):
+            tasks.append(self.search_soundgator(query, limit))
+        if config.SOURCES.get("freemusicarchive"):
+            tasks.append(self.search_freemusicarchive(query, limit))
+        if config.SOURCES.get("jamendo"):
+            tasks.append(self.search_jamendo(query, limit))
+        if config.SOURCES.get("internet_archive"):
+            tasks.append(self.search_internet_archive(query, limit))
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Объединяем и сортируем результаты
+        all_tracks = []
+        for result in results:
+            if isinstance(result, list):
+                all_tracks.extend(result)
+        
+        # Убираем дубликаты
+        unique_tracks = []
+        seen_ids = set()
+        for track in all_tracks:
+            if track['track_id'] not in seen_ids:
+                seen_ids.add(track['track_id'])
+                unique_tracks.append(track)
+        
+        # Сохраняем в кэш
+        db.add_search_to_cache(query, unique_tracks[:limit])
+        
+        return unique_tracks[:limit]
+    
+    async def download_audio(self, track_data: Dict) -> Tuple[Optional[str], Optional[str]]:
+        """Скачивание аудиофайла"""
+        try:
+            if track_data['source'] == 'youtube':
+                # Для YouTube используем yt-dlp для скачивания
+                ydl_opts = {
+                    'format': 'bestaudio/best',
+                    'outtmpl': f"{config.CACHE_DIR}/%(id)s.%(ext)s",
+                    'quiet': True,
+                    'no_warnings': True,
+                }
+                
+                ydl = yt_dlp.YoutubeDL(ydl_opts)
+                info = await asyncio.to_thread(
+                    ydl.extract_info, track_data['source_url'], download=True
+                )
+                
+                # Находим скачанный файл
+                downloaded_files = [f for f in os.listdir(config.CACHE_DIR) 
+                                  if f.startswith(info['id'])]
+                if downloaded_files:
+                    file_path = os.path.join(config.CACHE_DIR, downloaded_files[0])
+                    return file_path, info.get('title', 'Unknown')
+            
+            elif track_data['audio_url']:
+                # Для других источников скачиваем напрямую
+                async with self.session.get(track_data['audio_url']) as response:
+                    if response.status == 200:
+                        file_ext = 'mp3'  # или определить из Content-Type
+                        filename = f"{track_data['track_id']}.{file_ext}"
+                        file_path = os.path.join(config.CACHE_DIR, filename)
+                        
+                        async with aiofiles.open(file_path, 'wb') as f:
+                            await f.write(await response.read())
+                        
+                        return file_path, track_data['title']
+            
+            return None, None
+        except Exception as e:
+            print(f"Download error: {e}")
+            return None, None
+
+aggregator = MusicAggregator()
+
+# ============= ТЕЛЕГРАМ БОТ =============
+bot = Bot(token=config.BOT_TOKEN)
+dp = Dispatcher()
+
+# ============= КЛАВИАТУРЫ =============
+def get_search_keyboard(tracks: List[Dict], current_page: int = 0, per_page: int = 5) -> InlineKeyboardMarkup:
+    """Клавиатура для результатов поиска"""
+    start_idx = current_page * per_page
+    end_idx = start_idx + per_page
+    page_tracks = tracks[start_idx:end_idx]
+    
+    keyboard = []
+    for i, track in enumerate(page_tracks, start=1):
+        btn_text = f"{i}. {track['title'][:30]} - {track['artist'][:20]}"
+        callback_data = f"track_{track['track_id']}"
+        keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=callback_data)])
+    
+    # Кнопки навигации
+    nav_buttons = []
+    if current_page > 0:
+        nav_buttons.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"page_{current_page-1}"))
+    
+    if end_idx < len(tracks):
+        nav_buttons.append(InlineKeyboardButton(text="Вперед ▶️", callback_data=f"page_{current_page+1}"))
+    
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    
+    keyboard.append([InlineKeyboardButton(text="🔍 Новый поиск", callback_data="new_search")])
+    
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+def get_track_keyboard(track_id: str) -> InlineKeyboardMarkup:
+    """Клавиатура для управления треком"""
+    keyboard = [
+        [
+            InlineKeyboardButton(text="▶️ Слушать", callback_data=f"play_{track_id}"),
+            InlineKeyboardButton(text="⬇️ Скачать", callback_data=f"download_{track_id}")
+        ],
+        [
+            InlineKeyboardButton(text="🎵 Похожие", callback_data=f"similar_{track_id}"),
+            InlineKeyboardButton(text="🔙 Назад к поиску", callback_data="back_to_search")
+        ]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+# ============= ОБРАБОТЧИКИ =============
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    """Обработчик команды /start"""
+    db.add_user(message.from_user.id, message.from_user.username)
+    
+    welcome_text = """
+🎵 *Добро пожаловать в SoundCloud Clone Bot!*
+
+Я могу найти для вас любую музыку из бесплатных источников со всего мира.
+
+*Доступные команды:*
+/search - Поиск музыки
+/trending - Популярные треки
+/help - Помощь
+
+Просто отправьте название трека или исполнителя для поиска!
+    """
+    
+    await message.answer(welcome_text, parse_mode="Markdown")
+
+@dp.message(Command("search"))
+async def cmd_search(message: types.Message):
+    """Обработчик команды поиска"""
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("Введите запрос для поиска: /search <название трека или исполнителя>")
+        return
+    
+    query = args[1]
+    await message.answer(f"🔍 Ищу: *{query}*...", parse_mode="Markdown")
+    
+    # Ищем треки
+    tracks = await aggregator.aggregate_search(query, config.SEARCH_LIMIT)
+    
+    if not tracks:
+        await message.answer("❌ Ничего не найдено. П    
